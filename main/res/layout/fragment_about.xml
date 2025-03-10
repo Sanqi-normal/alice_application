@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/about_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Hello, Alice"
+            android:textSize="16sp"
+            android:textColor="@android:color/black" />
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@android:color/darker_gray" />
+        <TextView
+            android:id="@+id/about_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="\n\n      请首先前往-基础配置-填写ApiKey,填写后对话方可正常运行。\n\n      后配置可按照意愿自行更改。\n\n       其中，底部导航栏第二页面展示的内容是你所填写的网页链接，按需填写常用链接即可，填写完毕退出应用重进。\n\n        导入历史记录后会自动进行历史消息的量化，请勿强行中断，否则下次会重新加载。\n\n       历史记录的导入可由导出得到，也可按正确格式自行导入。\n\n        欢迎体验，祝愉快。\n\n        邮箱：2817152925@qq.com"
+            android:textSize="16sp"
+            android:textColor="@android:color/black" />
+    </LinearLayout>
+</layout>
