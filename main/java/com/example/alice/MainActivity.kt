@@ -31,7 +31,7 @@ import java.util.*
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var serviceIntent: Intent
-    private var aliceService: AliceService.AliceBinder? = null
+    var aliceService: AliceService.AliceBinder? = null
     private lateinit var progressDialog: AlertDialog // 新增：进度条对话框
     private lateinit var progressBar: ProgressBar // 新增：进度条控件
 
@@ -40,7 +40,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: MessageAdapter
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            aliceService = service as AliceService.AliceBinder // 修改：强制转换为 AliceBinder
+            aliceService = service as AliceService.AliceBinder
+            aliceService?.setUiCallback { position ->
+                (supportFragmentManager.findFragmentByTag(R.id.nav_chat.toString()) as? ChatFragment)?.adapter?.notifyItemChanged(position)
+            }
             loadHistory()
         }
         override fun onServiceDisconnected(name: ComponentName?) {

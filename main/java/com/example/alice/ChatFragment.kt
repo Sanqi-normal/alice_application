@@ -1,6 +1,7 @@
 package com.example.alice
 
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -18,9 +19,9 @@ import java.util.Locale
 class ChatFragment : Fragment() {
     private var _binding: FragmentChatBinding? = null
     private val binding get() = _binding!!
-    private lateinit var adapter: MessageAdapter
+    lateinit var adapter: MessageAdapter
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var assistantMessageIndex: Int = -1 // 新增：跟踪助理消息位置
+    private var assistantMessageIndex: Int = -1
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -34,12 +35,10 @@ class ChatFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        adapter = MessageAdapter(mutableListOf())
+        adapter = MessageAdapter(mutableListOf(), requireActivity() as MainActivity, ::deleteMessagePair, ::toggleMark)
 
         binding.messagesRecyclerView.apply {
-            layoutManager = LinearLayoutManager(context).apply {
-                stackFromEnd = true
-            }
+            layoutManager = LinearLayoutManager(context).apply { stackFromEnd = true }
             adapter = this@ChatFragment.adapter
             setHasFixedSize(true)
         }
@@ -51,10 +50,41 @@ class ChatFragment : Fragment() {
             if (message.isNotEmpty()) {
                 adapter.addMessage(Message("user", message, SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())))
                 scrollToBottom()
-                assistantMessageIndex = adapter.itemCount // 设置助理消息起始位置
+                assistantMessageIndex = adapter.itemCount
                 adapter.addMessage(Message("assistant", "", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())))
                 (activity as MainActivity).sendMessage(message)
                 binding.userInput.text.clear()
+            }
+        }
+    }
+
+    private var isDeleting = false
+    private fun deleteMessagePair(position: Int) {
+        if (isDeleting||position >= adapter.messages.size) return
+
+        isDeleting = true
+        scope.launch(Dispatchers.Main) {
+                (activity as MainActivity).aliceService?.getService()?.deleteMessagePair(position - 1)
+                adapter.messages.removeAt(position)
+                adapter.messages.removeAt(position - 1)
+                adapter.notifyItemRangeRemoved(position - 1, 2)
+                isDeleting = false
+
+        }
+    }
+
+    private fun toggleMark(position: Int) {
+        if (position < adapter.messages.size && adapter.messages[position].role == "user") {
+            (activity as MainActivity).aliceService?.getService()?.let { service ->
+                service.toggleMark(position)
+                // 同步适配器的 messages 列表
+                scope.launch {
+                    val updatedMessages = service.getMessages()
+                    // 可选：仅更新特定范围以提高性能
+                     adapter.messages[position] = updatedMessages[position]
+                     adapter.notifyItemRangeChanged(position, 2)
+                    Log.d("ChatFragment", "toggleMark: $position")
+                }
             }
         }
     }
@@ -66,10 +96,9 @@ class ChatFragment : Fragment() {
         }
     }
 
-    // 新增：更新助理消息内容
     fun updateAssistantMessage(content: String) {
         if (assistantMessageIndex >= 0 && assistantMessageIndex < adapter.itemCount) {
-            adapter.updateMessage(assistantMessageIndex, content) // 更新已有项
+            adapter.updateMessage(assistantMessageIndex, content)
             scrollToBottom()
         }
     }
@@ -86,10 +115,5 @@ class ChatFragment : Fragment() {
         super.onDestroyView()
         scope.cancel()
         _binding = null
-    }
-
-    override fun onResume() {
-        super.onResume()
-
     }
 }

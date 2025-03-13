@@ -65,7 +65,7 @@ object ApiService {
         }
         val request = Request.Builder()
             .url("https://api.siliconflow.cn/v1/chat/completions")
-            .header("Authorization", "Bearer <token>")
+            .header("Authorization", "Bearer apikey")
             .post(json.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
@@ -127,7 +127,7 @@ object ApiService {
 
         val request = Request.Builder()
             .url("https://api.deepseek.com/chat/completions")
-            .header("Authorization", "Bearer <token>")
+            .header("Authorization", "Bearer apikey")
             .post(json.toString().toRequestBody("application/json".toMediaType()))
             .build()
 

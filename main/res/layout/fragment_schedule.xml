@@ -1,14 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layout xmlns:android="http://schemas.android.com/apk/res/android">
+<layout xmlns:tools="http://schemas.android.com/tools"
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
     <RelativeLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent"
+        tools:ignore="ExtraText">
+
+        <!-- 添加空白行 -->
+        <Space
+            android:id="@+id/top_space"
+            android:layout_width="match_parent"
+            android:layout_height="48dp" /> <!-- 高度可以调整，48dp 约为一行的标准高度 -->
+
+        <!-- RecyclerView 下移，位于空白行下方 -->
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/schedule_list"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:layout_below="@id/top_space"
             android:background="?attr/selectableItemBackground"/>
 
+        <!-- 导入课表按钮右移并位于顶部 -->
+        <androidx.appcompat.widget.AppCompatButton
+            android:id="@+id/btn_import_schedule"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="导入课表"
+            android:textSize="18sp"
+            android:textColor="#0000FF"
+            android:layout_alignParentTop="true"
+            android:layout_alignParentEnd="true"
+            android:layout_marginTop="16dp"
+            android:layout_marginEnd="16dp" />
+ <!-- 右移并添加边距 -->
+
+        <!-- FloatingActionButton 保持不变 -->
         <com.google.android.material.floatingactionbutton.FloatingActionButton
             android:id="@+id/fab_add"
             android:layout_width="111dp"

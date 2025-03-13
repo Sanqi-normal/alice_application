@@ -1,10 +1,13 @@
 package com.example.alice
 
+import android.app.Activity
 import android.app.AlarmManager
 import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Paint
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -13,6 +16,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.alice.databinding.DialogAddScheduleBinding
@@ -21,16 +25,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Locale
 
 class ScheduleFragment : Fragment() {
     private var _binding: FragmentScheduleBinding? = null
     private val binding get() = _binding!!
     private lateinit var adapter: ScheduleAdapter
     private lateinit var db: AppDatabase
+    private val IMPORT_SCHEDULE_REQUEST = 1001
 
     companion object {
-        private const val TAG = "ScheduleFragment"
+        private const val TAG = "Alarm"
     }
 
     override fun onCreateView(
@@ -46,26 +54,31 @@ class ScheduleFragment : Fragment() {
 
         db = androidx.room.Room.databaseBuilder(
             requireContext(), AppDatabase::class.java, "app-db"
-        ).addMigrations(AppDatabase.MIGRATION_1_2)
-            .build()
+        ).addMigrations(AppDatabase.MIGRATION_1_2).build()
 
         binding.scheduleList.layoutManager = LinearLayoutManager(context)
         adapter = ScheduleAdapter(
-            onDelete = { schedule ->
+            onDelete = { event ->
                 CoroutineScope(Dispatchers.IO).launch {
-                    if (schedule.isExpired()) {
-                        db.scheduleDao().delete(schedule)
-                        cancelAlarm(schedule.id)
+                    val schedules = db.scheduleDao().getAllSync().filter { it.event == event }
+                    val allExpired = schedules.all { it.isExpired() }
+                    if (allExpired) {
+                        schedules.forEach {
+                            db.scheduleDao().delete(it)
+                            cancelAlarm(it.id)
+                        }
                         loadSchedules()
                     } else {
                         withContext(Dispatchers.Main) {
                             (activity as MainActivity).showConfirmDialog(
                                 title = "删除日程",
-                                message = "确定要删除此未过期的日程吗？",
+                                message = "确定要删除所有 '${event}' 的未过期日程吗？",
                                 onConfirm = {
                                     CoroutineScope(Dispatchers.IO).launch {
-                                        db.scheduleDao().delete(schedule)
-                                        cancelAlarm(schedule.id)
+                                        schedules.forEach {
+                                            db.scheduleDao().delete(it)
+                                            cancelAlarm(it.id)
+                                        }
                                         loadSchedules()
                                     }
                                 }
@@ -78,6 +91,12 @@ class ScheduleFragment : Fragment() {
         )
         binding.scheduleList.adapter = adapter
 
+        binding.btnImportSchedule.apply {
+            background = null
+            paintFlags = paintFlags or Paint.UNDERLINE_TEXT_FLAG
+            setOnClickListener { openFilePicker() }
+        }
+
         binding.fabAdd.setOnClickListener { showAddDialog() }
         loadSchedules()
     }
@@ -85,14 +104,12 @@ class ScheduleFragment : Fragment() {
     private fun loadSchedules() {
         CoroutineScope(Dispatchers.IO).launch {
             val schedules = db.scheduleDao().getAll()
+            val foldedItems = schedules.groupBy { it.event }.map { (event, schedules) ->
+                ScheduleAdapter.ScheduleItem(event, schedules.sortedBy { it.remindValue })
+            }.sortedWith(compareBy({ it.schedules.any { s -> !s.isExpired() }.not() }, { it.schedules.minOf { s -> s.addTime } }))
             withContext(Dispatchers.Main) {
-                val sortedSchedules = schedules.sortedWith(compareBy(
-                    { it.isExpired() }, // 过期放后面
-                    { it.addTime } // 非过期按添加时间排序
-                ))
-                adapter.submitList(sortedSchedules)
-                Log.d(TAG, "Loaded ${sortedSchedules.size} schedules")
-                // 移除：不在此处设置闹钟
+                adapter.submitList(foldedItems)
+                Log.d(TAG, "Loaded ${schedules.size} schedules, folded into ${foldedItems.size} items")
             }
         }
     }
@@ -102,10 +119,72 @@ class ScheduleFragment : Fragment() {
         return when (remindType) {
             "当天定时" -> remindValue < currentTime
             "事件发生前" -> (eventTime ?: Long.MAX_VALUE) < currentTime
-            else -> false // “每天定时”和“不提醒”不过期
+            else -> false
         }
     }
 
+    private fun importScheduleFromJson(uri: Uri) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val inputStream = requireContext().contentResolver.openInputStream(uri)
+                val jsonText = inputStream?.bufferedReader()?.use { it.readText() }
+                inputStream?.close()
+
+                val jsonArray = JSONArray(jsonText)
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val dateStr = obj.getString("date")
+                    val timeStr = obj.getString("time")
+                    val event = obj.getString("event")
+                    val note = obj.optString("note", null)
+
+                    val dateFormat = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
+                    val eventTime = dateFormat.parse("$dateStr $timeStr").time
+
+                    val schedule = Schedule(
+                        addTime = System.currentTimeMillis(),
+                        event = event,
+                        remindType = "事件发生前",
+                        remindValue = 30L, // 提前 30 分钟
+                        eventTime = eventTime, // 实际事件时间
+                        remindMethods = "notify;ai",
+                        note = note
+                    )
+
+                    db.scheduleDao().insert(schedule)
+                    withContext(Dispatchers.Main) {
+                        setAlarm(schedule)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    loadSchedules()
+                    Toast.makeText(context, "课表导入成功", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "导入失败: ${e.message}", Toast.LENGTH_LONG).show()
+                    Log.e(TAG, "Import failed: ${e.message}", e)
+                }
+            }
+        }
+    }
+    private fun openFilePicker() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "application/json"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        startActivityForResult(Intent.createChooser(intent, "选择课表文件"), IMPORT_SCHEDULE_REQUEST)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == IMPORT_SCHEDULE_REQUEST && resultCode == Activity.RESULT_OK) {
+            data?.data?.let { uri ->
+                importScheduleFromJson(uri)
+            }
+        }
+    }
     private fun showAddDialog() {
         val dialogBinding = DialogAddScheduleBinding.inflate(LayoutInflater.from(context))
         val dialog = AlertDialog.Builder(requireContext())
@@ -422,6 +501,8 @@ class ScheduleFragment : Fragment() {
             putExtra("schedule_id", schedule.id)
             putExtra("event", schedule.event)
             putExtra("remind_methods", schedule.remindMethods)
+            putExtra("remind_type", schedule.remindType) // 新增
+            putExtra("note", schedule.note) // 新增
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context, schedule.id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -430,29 +511,19 @@ class ScheduleFragment : Fragment() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 if (alarmManager.canScheduleExactAlarms()) {
-                    if (schedule.remindType == "每天定时") {
-                        alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, triggerTime, AlarmManager.INTERVAL_DAY, pendingIntent)
-                    } else {
-                        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-                    }
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+                    Log.w(TAG, "Exact alarm set for schedule ${schedule.id}: ${schedule.event}, triggerTime=${formatTime(triggerTime)}, type=${schedule.remindType}")
                 } else {
-                    Log.e(TAG, "No permission to schedule exact alarms")
+                    Log.e(TAG, "No permission to schedule exact alarms for schedule ${schedule.id}")
                 }
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (schedule.remindType == "每天定时") {
-                    alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, triggerTime, AlarmManager.INTERVAL_DAY, pendingIntent)
-                } else {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-                }
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+                Log.w(TAG, "Exact alarm set (API 23+) for schedule ${schedule.id}: ${schedule.event}, triggerTime=${formatTime(triggerTime)}, type=${schedule.remindType}")
             } else {
-                if (schedule.remindType == "每天定时") {
-                    alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, triggerTime, AlarmManager.INTERVAL_DAY, pendingIntent)
-                } else {
-                    alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-                }
+                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+                Log.w(TAG, "Exact alarm set (pre-API 23) for schedule ${schedule.id}: ${schedule.event}, triggerTime=${formatTime(triggerTime)}, type=${schedule.remindType}")
             }
-            Log.w(TAG, "Alarm set for schedule ${schedule.id}: ${schedule.event}, triggerTime=${formatTime(triggerTime)}")
-        } catch (e: SecurityException) {
+                } catch (e: SecurityException) {
             Log.e(TAG, "Failed to set alarm for schedule ${schedule.id}: ${e.message}", e)
         }
     }

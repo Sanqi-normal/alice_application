@@ -15,4 +15,6 @@ interface ScheduleDao {
 
     @Query("SELECT * FROM schedules")
     suspend fun getAll(): List<Schedule>
+    @Query("SELECT * FROM schedules")
+    fun getAllSync(): List<Schedule> // 新增同步方法
 }

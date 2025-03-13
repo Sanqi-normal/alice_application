@@ -11,11 +11,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.FileProvider
 import androidx.room.Room
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -33,6 +35,8 @@ class AliceService : Service() {
     private val messages = mutableListOf<Message>()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var aiMessageReceiver: BroadcastReceiver
+    private val markedMessages = mutableListOf<Pair<Message, Message>>() // 标记的消息对，最多5个
+    private var uiCallback: ((Int) -> Unit)? = null // 添加回调
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -53,10 +57,77 @@ class AliceService : Service() {
         fun clearHistory(callback: () -> Unit) = this@AliceService.clearHistory(callback)
         fun exportHistory(outputPath: String? = null) = this@AliceService.exportHistory(outputPath)
         fun importHistory(uri: String) = this@AliceService.importHistory(uri)
+        fun deleteMessagePair(position: Int) = this@AliceService.deleteMessagePair(position)
+        fun toggleMark(position: Int) = this@AliceService.toggleMark(position)
+        fun setUiCallback(callback: (Int) -> Unit) { }// 设置回调
     }
     fun getMessages(): List<Message> = messages.toList()
     override fun onBind(intent: Intent?): IBinder = binder
+    fun deleteMessagePair(position: Int) {
+        if (position + 1 < messages.size && messages[position].role == "user" && messages[position + 1].role == "assistant") {
+            scope.launch(Dispatchers.IO) {
+                messages.removeAt(position + 1)
+                messages.removeAt(position)
+                saveHistory()
+                updateEmbeddingsAfterDeletion(position)
+            }
+        }
+    }
+    private suspend fun updateEmbeddingsAfterDeletion(deletedPosition: Int) {
+        val embeddingsFile = File(filesDir, "memory_embeddings.json")
+        if (!embeddingsFile.exists()) return
 
+        val embeddingsJson = embeddingsFile.readText()
+        val embeddingsArray = JSONArray(embeddingsJson)
+        val embeddings = (0 until embeddingsArray.length()).map { i ->
+            val obj = embeddingsArray.getJSONObject(i)
+            Embedding(
+                embedding = obj.getJSONArray("embedding").let { array ->
+                    (0 until array.length()).map { array.getDouble(it).toFloat() }
+                },
+                index = obj.getInt("index")
+            )
+        }.toMutableList()
+
+        embeddings.removeAll { it.index == deletedPosition || it.index == deletedPosition + 1 }
+        saveEmbeddings(embeddings)
+    }
+    fun toggleMark(position: Int) {
+        Log.d("Mark", "Service执行了Mark逻辑")
+        if (position + 1 < messages.size && messages[position].role == "user" && messages[position + 1].role == "assistant") {
+            val userMsg = messages[position]
+            val assistantMsg = messages[position + 1]
+            val isCurrentlyMarked = userMsg.isMarked
+
+            if (isCurrentlyMarked) {
+                Log.d("Mark", "Mark 逻辑：取消标记并移出数组")
+                // 使用属性比较移除消息对
+                Log.d("Mark", "Before removal: ${markedMessages.size}")
+                markedMessages.removeAll { pair ->
+                    pair.first.content == userMsg.content && pair.first.timeStamp == userMsg.timeStamp &&
+                            pair.second.content == assistantMsg.content && pair.second.timeStamp == assistantMsg.timeStamp
+                }
+                Log.d("Mark", "After removal: ${markedMessages.size}")
+                messages[position] = userMsg.copy(isMarked = false)
+            } else {
+                Log.d("Mark", "Mark 逻辑：标记并添加到数组")
+                if (markedMessages.size >= 5) {
+                    val oldest = markedMessages.removeAt(0)
+                    messages.find { it == oldest.first }?.let {
+                        messages[messages.indexOf(it)] = it.copy(isMarked = false)
+                    }
+                }
+                markedMessages.add(Pair(userMsg, assistantMsg))
+                messages[position] = userMsg.copy(isMarked = true)
+            }
+            saveHistory()
+            scope.launch(Dispatchers.Main) {
+                Log.d("Mark", "Mark 逻辑：更新UI")
+                uiCallback?.invoke(position)
+                uiCallback?.invoke(position + 1)
+            }
+        }
+    }
     @SuppressLint("ForegroundServiceType")
     override fun onCreate() {
         super.onCreate()
@@ -101,11 +172,11 @@ class AliceService : Service() {
                     scope.launch {
                         sendToAlice(
                             "($message)",
-                            SettingsData.getSystemPrompt(),
+                            SettingsData.getSystemPrompt()+"\n当前为日程提醒模式，提醒用户包含在当前消息里的即将到来的日程，禁止虚构其他日程",
                             SettingsData.getTemperature(),
                             SettingsData.getApiKey(),
                             messages.takeLast(10),
-                            128
+                            4096
                         )
                     }
                 }
@@ -206,35 +277,35 @@ class AliceService : Service() {
         }
         val request = okhttp3.Request.Builder()
             .url("https://api.siliconflow.cn/v1/embeddings")
-            .header("Authorization", "Bearer <token>")
+            .header("Authorization", "Bearer apikey")
             .header("Content-Type", "application/json")
             .post(json.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         return withContext(Dispatchers.IO){
             try {
-            val response =  client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.e("QUAN", "网络请求失败，状态码：${response.code}")
-                response.close()
-                return@withContext null
-            }
+                val response =  client.newCall(request).execute()
+                if (!response.isSuccessful) {
+                    Log.e("QUAN", "网络请求失败，状态码：${response.code}")
+                    response.close()
+                    return@withContext null
+                }
 
-            response.body?.use { body ->
-                Log.d("QUAN", "量化网络请求响应成功")
-                val responseJson = JSONObject(body.string())
-                val embeddingArray = responseJson.getJSONArray("data").getJSONObject(0).getJSONArray("embedding")
-                (0 until embeddingArray.length()).map { embeddingArray.getDouble(it).toFloat() }
-            } ?: run {
-                Log.e("QUAN", "网络请求失败，body 为 null")
-                response.close()
-                return@run null
-            }
-        } catch (e: Exception) {
-            Log.e("TEST", "Quantize failed: ${e.message}", e)
+                response.body?.use { body ->
+                    Log.d("QUAN", "量化网络请求响应成功")
+                    val responseJson = JSONObject(body.string())
+                    val embeddingArray = responseJson.getJSONArray("data").getJSONObject(0).getJSONArray("embedding")
+                    (0 until embeddingArray.length()).map { embeddingArray.getDouble(it).toFloat() }
+                } ?: run {
+                    Log.e("QUAN", "网络请求失败，body 为 null")
+                    response.close()
+                    return@run null
+                }
+            } catch (e: Exception) {
+                Log.e("TEST", "Quantize failed: ${e.message}", e)
                 return@withContext null
+            }
         }
-    }
     }
 
 
@@ -287,17 +358,34 @@ class AliceService : Service() {
                     withContext(Dispatchers.Main) { callback("Error: Setup required") }
                     return@launch
                 }
-
                 // 恢复：量化对话逻辑
                 val queryEmbedding = quantizeConversation(message)
-                val enhancedPrompt = if (queryEmbedding != null) {
-                    val embeddingsFile = File(filesDir, "memory_embeddings.json")
-                    if (embeddingsFile.exists()) {
-                        val context = getRelevantContext(queryEmbedding, embeddingsFile)
-                        if (context.isNotEmpty()) "[相关记忆]\n$context\n" else ""
-                    } else ""
-                } else ""
+                val markedContext = markedMessages.joinToString("\n") { "${it.first.role}: ${it.first.content}\n${it.second.role}: ${it.second.content}" }
+                val enhancedPrompt = buildString {
+                    // 添加系统提示
+                    append(systemPrompt)
 
+                    // 处理相关记忆
+                    if (queryEmbedding != null) {
+                        val embeddingsFile = File(filesDir, "memory_embeddings.json")
+                        if (embeddingsFile.exists()) {
+                            val context = getRelevantContext(queryEmbedding, embeddingsFile)
+                            if (context.isNotEmpty()) {
+                                append("\n[相关记忆]\n")
+                                append(context)
+                            }
+                        }
+                    }
+
+                    // 处理标记对话
+                    if (markedContext.isNotEmpty()) {
+                        append("\n[标记的对话]\n")
+                        append(markedMessages.joinToString("\n") {
+                            "${it.first.role}: ${it.first.content}\n${it.second.role}: ${it.second.content}"
+                        })
+                    }
+                }
+                Log.d("QUAN", "enhancedPrompt: $enhancedPrompt\nrecentHistory:$recentHistory")
                 sendToAlice(
                     message,
                     systemPrompt + enhancedPrompt,
@@ -328,7 +416,7 @@ class AliceService : Service() {
         }
         val topK = findTopKSimilar(queryEmbedding, embeddings, messages)
         return topK.joinToString("\n") {
-            "${it.user?.role ?: "Unknown"}: ${it.user?.content ?: ""}\n${it.assistant?.role ?: "Unknown"}: ${it.assistant?.content ?: ""}"
+            "\n${it.user?.role ?: "Unknown"}: ${it.user?.content ?: ""}\n${it.assistant?.role ?: "Unknown"}: ${it.assistant?.content ?: ""}\n"
         }
     }
 
@@ -424,7 +512,7 @@ class AliceService : Service() {
         scope.launch(Dispatchers.Main) { callback() }
     }
 
-    private fun exportHistory(outputPath: String? = null) {
+    fun exportHistory(outputPath: String? = null): Uri {
         val jsonArray = JSONArray()
         messages.filter { it.role != "system" }.forEach {
             jsonArray.put(JSONObject().apply {
@@ -436,6 +524,8 @@ class AliceService : Service() {
         val file = File(outputPath ?: "${filesDir}/alice_chat_history.json")
         file.writeText(jsonArray.toString(2))
         addMessage("system", "历史记录已导出到: ${file.absolutePath}", false)
+        // 返回文件的 Uri，使用 FileProvider
+        return FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
     }
 
     private fun importHistory(uri: String) {
@@ -472,6 +562,7 @@ class AliceService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(aiMessageReceiver)
+        markedMessages.clear() // 关闭时清空标记数组
         scope.cancel()
     }
 }
